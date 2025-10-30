@@ -1,0 +1,54 @@
+name: Dependency Updates
+
+on:
+  schedule:
+    # Run weekly on Monday at 9 AM UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  update-dependencies:
+    name: Check for Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.10
+
+      - name: Check for updates
+        run: |
+          uv pip install pip-tools
+          uv pip list --outdated
+
+      - name: Create issue for outdated dependencies
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            try {
+              const outdated = execSync('uv pip list --outdated --format=json').toString();
+              const packages = JSON.parse(outdated);
+
+              if (packages.length > 0) {
+                let body = '## Outdated Dependencies\n\n';
+                body += '| Package | Current | Latest |\n';
+                body += '|---------|---------|--------|\n';
+                packages.forEach(pkg => {
+                  body += `| ${pkg.name} | ${pkg.version} | ${pkg.latest_version} |\n`;
+                });
+
+                github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: 'Dependencies need updating',
+                  body: body,
+                  labels: ['dependencies', 'maintenance']
+                });
+              }
+            } catch (error) {
+              console.log('No outdated packages or error checking:', error.message);
+            }

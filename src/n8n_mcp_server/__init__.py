@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import logging
 import os
+import signal
+import sys
 from typing import Any, Optional
 
 import httpx
@@ -10,22 +13,76 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 class N8nMCPServer:
     """MCP Server for n8n API integration."""
 
-    def __init__(self, n8n_url: str, api_key: str):
+    def __init__(self, n8n_url: str, api_key: str, timeout: float = 30.0, verify_ssl: bool = True):
+        from urllib.parse import urlparse
+
+        # Validate and check HTTPS
+        parsed_url = urlparse(n8n_url)
+        if parsed_url.scheme == 'http' and 'localhost' not in parsed_url.netloc and '127.0.0.1' not in parsed_url.netloc:
+            logger.warning(
+                "WARNING: Using unencrypted HTTP connection to n8n. "
+                "Your API key will be transmitted in plaintext. "
+                "Consider using HTTPS for security."
+            )
+
         self.n8n_url = n8n_url.rstrip("/")
         self.api_key = api_key
+        self.timeout = timeout
+        self.verify_ssl = verify_ssl
         self.server = Server("n8n-mcp-server")
+        self.client: Optional[httpx.AsyncClient] = None
+        self._api_key = api_key
+
+        if not verify_ssl:
+            logger.warning(
+                "SSL certificate verification is DISABLED. "
+                "This should only be used in development environments!"
+            )
+
+        logger.info(f"HTTP timeout configured: {timeout}s")
+        self._setup_handlers()
+
+    async def __aenter__(self):
+        """Async context manager entry."""
         self.client = httpx.AsyncClient(
-            timeout=30.0,
+            timeout=httpx.Timeout(
+                timeout=self.timeout,
+                connect=10.0,
+                read=self.timeout,
+                write=10.0,
+                pool=5.0
+            ),
             headers={
-                "X-N8N-API-KEY": self.api_key,
+                "X-N8N-API-KEY": self._api_key,
                 "Content-Type": "application/json",
             },
+            verify=self.verify_ssl,
+            follow_redirects=False,
+            limits=httpx.Limits(
+                max_keepalive_connections=10,
+                max_connections=20,
+            )
         )
-        self._setup_handlers()
+        logger.info("n8n MCP Server initialized")
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        if self.client:
+            await self.client.aclose()
+            logger.info("n8n MCP Server client closed")
+        return False
 
     async def _make_request(
         self,
@@ -447,25 +504,81 @@ class N8nMCPServer:
                 self.server.create_initialization_options(),
             )
 
-    async def cleanup(self):
-        """Cleanup resources."""
-        await self.client.aclose()
+
+async def async_main():
+    """Async main function with proper resource cleanup."""
+    # Configure logging level from environment
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.getLogger().setLevel(getattr(logging, log_level, logging.INFO))
+
+    logger.info("Starting n8n MCP Server")
+
+    n8n_url = os.getenv("N8N_URL", "http://localhost:5678")
+    api_key = os.getenv("N8N_API_KEY")
+
+    # Configure timeout
+    try:
+        timeout = float(os.getenv("N8N_TIMEOUT", "30"))
+    except ValueError:
+        logger.warning("Invalid N8N_TIMEOUT value, using default 30s")
+        timeout = 30.0
+
+    # Configure SSL verification
+    verify_ssl = os.getenv("N8N_VERIFY_SSL", "true").lower() != "false"
+
+    if not api_key:
+        logger.error("N8N_API_KEY environment variable is not set")
+        raise ValueError("N8N_API_KEY environment variable is required")
+
+    # Use async context manager for proper cleanup
+    async with N8nMCPServer(n8n_url, api_key, timeout=timeout, verify_ssl=verify_ssl) as server:
+        # Setup graceful shutdown
+        shutdown_event = asyncio.Event()
+
+        def signal_handler(signum, frame):
+            """Handle shutdown signals."""
+            logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+            shutdown_event.set()
+
+        # Register signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+        try:
+            # Run server with shutdown handling
+            server_task = asyncio.create_task(server.run())
+            shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+            # Wait for either server to finish or shutdown signal
+            done, pending = await asyncio.wait(
+                [server_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            logger.info("n8n MCP Server stopped")
+
+        except Exception as e:
+            logger.exception("Server error")
+            raise
 
 
 def main():
     """Main entry point."""
-    n8n_url = os.getenv("N8N_URL", "http://localhost:5678")
-    api_key = os.getenv("N8N_API_KEY")
-
-    if not api_key:
-        raise ValueError("N8N_API_KEY environment variable is required")
-
-    server = N8nMCPServer(n8n_url, api_key)
-
     try:
-        asyncio.run(server.run())
-    finally:
-        asyncio.run(server.cleanup())
+        asyncio.run(async_main())
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.exception("Fatal error")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
