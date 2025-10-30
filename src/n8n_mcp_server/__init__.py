@@ -2,13 +2,18 @@
 
 import asyncio
 import json
+import logging
 import os
+import re
 from typing import Any, Optional
 
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class N8nMCPServer:
@@ -45,15 +50,79 @@ class N8nMCPServer:
                 params=params,
             )
             response.raise_for_status()
-            
+
             # Some endpoints return empty responses
             if response.status_code == 204 or not response.content:
                 return {"success": True}
-            
+
             return response.json()
 
-        except httpx.HTTPError as e:
-            raise Exception(f"n8n API error: {str(e)}")
+        except httpx.HTTPStatusError as e:
+            # Log full error internally for debugging
+            logger.error(f"n8n API error: {method} {endpoint} - {e.response.status_code} - {str(e)}")
+
+            # Return sanitized error message to user
+            status_code = e.response.status_code
+            error_messages = {
+                401: "Authentication failed. Please check your API key.",
+                403: "Access denied. Insufficient permissions.",
+                404: "Resource not found.",
+                429: "Rate limit exceeded. Please try again later.",
+                500: "n8n server error. Please check your n8n instance.",
+                503: "n8n service unavailable.",
+            }
+            user_message = error_messages.get(
+                status_code,
+                "An error occurred while communicating with n8n."
+            )
+            raise Exception(user_message)
+
+        except httpx.RequestError as e:
+            # Log full error internally
+            logger.error(f"Request error: {method} {endpoint} - {str(e)}")
+            raise Exception("Unable to connect to n8n. Please check your N8N_URL.")
+
+    def _validate_id(self, id_value: Any, id_name: str = "ID") -> str:
+        """
+        Validate that an ID is safe to use in URLs.
+
+        Args:
+            id_value: The ID to validate
+            id_name: Name of the ID for error messages
+
+        Returns:
+            The validated ID as a string
+
+        Raises:
+            ValueError: If the ID is invalid
+        """
+        if not id_value:
+            raise ValueError(f"{id_name} is required")
+
+        # Convert to string
+        id_str = str(id_value).strip()
+
+        # Check for empty after stripping
+        if not id_str:
+            raise ValueError(f"{id_name} cannot be empty")
+
+        # Validate format - n8n IDs are typically numeric or alphanumeric
+        # Allow: numbers, letters, hyphens, underscores
+        if not re.match(r'^[a-zA-Z0-9_-]+$', id_str):
+            raise ValueError(
+                f"{id_name} contains invalid characters. "
+                f"Only alphanumeric, hyphens, and underscores are allowed."
+            )
+
+        # Check length (n8n IDs shouldn't be extremely long)
+        if len(id_str) > 100:
+            raise ValueError(f"{id_name} is too long (max 100 characters)")
+
+        # Prevent path traversal attempts
+        if '..' in id_str or '/' in id_str or '\\' in id_str:
+            raise ValueError(f"{id_name} contains invalid path characters")
+
+        return id_str
 
     def _setup_handlers(self):
         """Set up MCP request handlers."""
@@ -333,7 +402,13 @@ class N8nMCPServer:
                 return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
             except Exception as e:
-                return [TextContent(type="text", text=f"Error: {str(e)}")]
+                # Log full error internally for debugging
+                logger.exception(f"Tool execution error: {name}")
+
+                # Return safe error message to user
+                error_msg = str(e) if isinstance(e, Exception) and len(str(e)) < 200 else \
+                            "An unexpected error occurred. Please check your configuration."
+                return [TextContent(type="text", text=f"Error: {error_msg}")]
 
     # Tool implementations
     async def _list_workflows(self, args: dict) -> Any:
@@ -346,7 +421,8 @@ class N8nMCPServer:
 
     async def _get_workflow(self, args: dict) -> Any:
         """Get workflow details."""
-        return await self._make_request(f"/workflows/{args['workflow_id']}")
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
+        return await self._make_request(f"/workflows/{workflow_id}")
 
     async def _create_workflow(self, args: dict) -> Any:
         """Create workflow."""
@@ -365,7 +441,7 @@ class N8nMCPServer:
 
     async def _update_workflow(self, args: dict) -> Any:
         """Update workflow."""
-        workflow_id = args.pop("workflow_id")
+        workflow_id = self._validate_id(args.pop("workflow_id"), "Workflow ID")
         data = {k: v for k, v in args.items() if v is not None}
 
         return await self._make_request(
@@ -374,34 +450,38 @@ class N8nMCPServer:
 
     async def _delete_workflow(self, args: dict) -> Any:
         """Delete workflow."""
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
         return await self._make_request(
-            f"/workflows/{args['workflow_id']}", method="DELETE"
+            f"/workflows/{workflow_id}", method="DELETE"
         )
 
     async def _activate_workflow(self, args: dict) -> Any:
         """Activate workflow."""
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
         return await self._make_request(
-            f"/workflows/{args['workflow_id']}",
+            f"/workflows/{workflow_id}",
             method="PATCH",
             data={"active": True},
         )
 
     async def _deactivate_workflow(self, args: dict) -> Any:
         """Deactivate workflow."""
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
         return await self._make_request(
-            f"/workflows/{args['workflow_id']}",
+            f"/workflows/{workflow_id}",
             method="PATCH",
             data={"active": False},
         )
 
     async def _execute_workflow(self, args: dict) -> Any:
         """Execute workflow."""
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
         data = {}
         if args.get("data"):
             data = args["data"]
 
         return await self._make_request(
-            f"/workflows/{args['workflow_id']}/execute", method="POST", data=data
+            f"/workflows/{workflow_id}/execute", method="POST", data=data
         )
 
     async def _list_executions(self, args: dict) -> Any:
@@ -418,12 +498,14 @@ class N8nMCPServer:
 
     async def _get_execution(self, args: dict) -> Any:
         """Get execution details."""
-        return await self._make_request(f"/executions/{args['execution_id']}")
+        execution_id = self._validate_id(args.get('execution_id'), "Execution ID")
+        return await self._make_request(f"/executions/{execution_id}")
 
     async def _delete_execution(self, args: dict) -> Any:
         """Delete execution."""
+        execution_id = self._validate_id(args.get('execution_id'), "Execution ID")
         return await self._make_request(
-            f"/executions/{args['execution_id']}", method="DELETE"
+            f"/executions/{execution_id}", method="DELETE"
         )
 
     async def _list_credentials(self, args: dict) -> Any:
