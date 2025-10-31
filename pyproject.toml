@@ -29,7 +29,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Office/Business :: Workflow",
+    "Topic :: Office/Business",
     "Framework :: AsyncIO",
     "Operating System :: OS Independent",
     "Typing :: Typed",
