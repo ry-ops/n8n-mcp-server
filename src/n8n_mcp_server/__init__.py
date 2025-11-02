@@ -145,15 +145,38 @@ class N8nMCPServer:
                 params=params,
             )
             response.raise_for_status()
-            
+
             # Some endpoints return empty responses
             if response.status_code == 204 or not response.content:
                 return {"success": True}
-            
+
             return response.json()
 
-        except httpx.HTTPError as e:
-            raise Exception(f"n8n API error: {str(e)}")
+        except httpx.HTTPStatusError as e:
+            # Log full error internally for debugging
+            logger.error(f"n8n API error: {method} {endpoint} - {e.response.status_code} - {str(e)}")
+
+            # Return user-friendly sanitized message
+            status_code = e.response.status_code
+            error_messages = {
+                401: "Authentication failed. Please check your API key.",
+                403: "Access denied. Insufficient permissions.",
+                404: "Resource not found.",
+                429: "Rate limit exceeded. Please try again later.",
+                500: "n8n server error. Please check your n8n instance.",
+                503: "n8n service unavailable.",
+            }
+            user_message = error_messages.get(
+                status_code,
+                "An error occurred while communicating with n8n."
+            )
+            raise Exception(user_message)
+
+        except httpx.RequestError as e:
+            # Log full error internally
+            logger.error(f"Request error: {method} {endpoint} - {str(e)}")
+            # Return sanitized message
+            raise Exception("Unable to connect to n8n. Please check your N8N_URL.")
 
     def _setup_handlers(self):
         """Set up MCP request handlers."""

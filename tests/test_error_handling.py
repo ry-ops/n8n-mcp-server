@@ -18,7 +18,8 @@ async def test_http_status_error_handling(n8n_server, mock_httpx_client):
     with pytest.raises(Exception) as exc_info:
         await n8n_server._get_workflow({"workflow_id": "nonexistent"})
 
-    assert "error" in str(exc_info.value).lower()
+    # Should return sanitized user-friendly message for 404
+    assert str(exc_info.value) == "Resource not found."
 
 
 @pytest.mark.asyncio
@@ -29,7 +30,8 @@ async def test_connection_error_handling(n8n_server, mock_httpx_client):
     with pytest.raises(Exception) as exc_info:
         await n8n_server._list_workflows({})
 
-    assert "error" in str(exc_info.value).lower()
+    # Should return sanitized connection error message
+    assert str(exc_info.value) == "Unable to connect to n8n. Please check your N8N_URL."
 
 
 @pytest.mark.asyncio
@@ -40,7 +42,8 @@ async def test_timeout_handling(n8n_server, mock_httpx_client):
     with pytest.raises(Exception) as exc_info:
         await n8n_server._list_workflows({})
 
-    assert "error" in str(exc_info.value).lower()
+    # Should return sanitized timeout error message (TimeoutException is a RequestError)
+    assert str(exc_info.value) == "Unable to connect to n8n. Please check your N8N_URL."
 
 
 @pytest.mark.asyncio
@@ -56,9 +59,12 @@ async def test_401_error_message(n8n_server, mock_httpx_client):
     with pytest.raises(Exception) as exc_info:
         await n8n_server._list_workflows({})
 
-    # Should not contain internal error details
+    # Should return sanitized authentication error message, not internal details
     error_msg = str(exc_info.value)
-    assert "error" in error_msg.lower()
+    assert error_msg == "Authentication failed. Please check your API key."
+    # Verify it doesn't contain the raw HTTP error details
+    assert "Unauthorized" not in error_msg
+    assert "401" not in error_msg
 
 
 @pytest.mark.asyncio
