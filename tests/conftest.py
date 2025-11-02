@@ -18,7 +18,7 @@ def n8n_server(mock_httpx_client):
     """Create N8nMCPServer instance with mocked client."""
     server = N8nMCPServer(
         n8n_url="http://localhost:5678",
-        api_key="test_api_key"
+        api_key="fake-test-key-not-real-n8n-12345"  # Not a real API key - for testing only
     )
     server.client = mock_httpx_client
     return server
