@@ -35,9 +35,13 @@ jobs:
           # Check for outdated packages
           uv pip list --outdated > outdated.txt || true
 
-          # Count outdated packages
-          OUTDATED_COUNT=$(grep -c "^" outdated.txt || echo "0")
-          echo "outdated_count=$OUTDATED_COUNT" >> $GITHUB_OUTPUT
+          # Count outdated packages (excluding header lines if any)
+          if [ -s outdated.txt ]; then
+            OUTDATED_COUNT=$(wc -l < outdated.txt | tr -d ' ')
+          else
+            OUTDATED_COUNT=0
+          fi
+          echo "outdated_count=${OUTDATED_COUNT}" >> $GITHUB_OUTPUT
 
           # Display results
           cat outdated.txt
