@@ -262,6 +262,187 @@ This project uses [uv](https://github.com/astral-sh/uv) because it's:
 - 🎯 **Simpler** - one tool for everything
 - 🐍 **Modern** - built in Rust, designed for Python
 
+## A2A Protocol Support
+
+The n8n MCP Server now supports the Agent-to-Agent (A2A) protocol, enabling direct agent-to-agent communication via HTTP endpoints in addition to the standard MCP stdio transport.
+
+### Agent Card
+
+The agent card is located at `/agent-card.json` and provides:
+- Server capabilities and metadata
+- Available skills (all 13 n8n tools)
+- Authentication requirements
+- Input/output schemas for each skill
+
+Access via discovery endpoint: `/.well-known/agent-card.json`
+
+### A2A HTTP Endpoints
+
+#### Discovery Endpoint
+```
+GET /.well-known/agent-card.json
+```
+Returns the agent card for A2A discovery.
+
+#### Capabilities Endpoint
+```
+GET /a2a/capabilities
+Headers: X-N8N-API-KEY: your_api_key
+```
+Returns server capabilities and available skills.
+
+#### Execute Skill
+```
+POST /a2a/execute
+Headers: X-N8N-API-KEY: your_api_key
+Content-Type: application/json
+
+{
+  "skill_id": "list_workflows",
+  "parameters": {
+    "active": true
+  }
+}
+```
+
+#### Batch Execution
+```
+POST /a2a/batch
+Headers: X-N8N-API-KEY: your_api_key
+Content-Type: application/json
+
+{
+  "requests": [
+    {
+      "skill_id": "list_workflows",
+      "parameters": {"active": true}
+    },
+    {
+      "skill_id": "list_executions",
+      "parameters": {"limit": 10}
+    }
+  ]
+}
+```
+
+### Running A2A HTTP Server
+
+To run the server in A2A HTTP mode (requires FastAPI):
+
+```bash
+# Install with A2A dependencies
+pip install fastapi uvicorn
+
+# Run the A2A HTTP server
+uvicorn n8n_mcp_server.a2a_server:app --host 0.0.0.0 --port 8000
+```
+
+Or using uv:
+
+```bash
+uv pip install fastapi uvicorn
+uv run uvicorn n8n_mcp_server.a2a_server:app --host 0.0.0.0 --port 8000
+```
+
+### Available Skills for A2A
+
+All 13 MCP tools are exposed as A2A skills:
+
+**Workflow Management:**
+- `list_workflows` - List all workflows
+- `get_workflow` - Get workflow details
+- `create_workflow` - Create new workflow
+- `update_workflow` - Update existing workflow
+- `delete_workflow` - Delete workflow
+
+**Workflow Control:**
+- `activate_workflow` - Activate workflow
+- `deactivate_workflow` - Deactivate workflow
+- `execute_workflow` - Execute workflow manually
+
+**Execution Management:**
+- `list_executions` - List executions
+- `get_execution` - Get execution details
+- `delete_execution` - Delete execution
+
+**Other Operations:**
+- `list_credentials` - List credentials
+- `list_tags` - List tags
+
+### A2A Integration Examples
+
+#### Python Agent Integration
+```python
+import httpx
+
+async def call_n8n_agent():
+    async with httpx.AsyncClient() as client:
+        # Get capabilities
+        response = await client.get(
+            "http://localhost:8000/a2a/capabilities",
+            headers={"X-N8N-API-KEY": "your_api_key"}
+        )
+        capabilities = response.json()
+
+        # Execute skill
+        response = await client.post(
+            "http://localhost:8000/a2a/execute",
+            headers={"X-N8N-API-KEY": "your_api_key"},
+            json={
+                "skill_id": "list_workflows",
+                "parameters": {"active": True}
+            }
+        )
+        result = response.json()
+        print(result)
+```
+
+#### cURL Examples
+```bash
+# Get agent card
+curl http://localhost:8000/.well-known/agent-card.json
+
+# Get capabilities
+curl -H "X-N8N-API-KEY: your_api_key" \
+     http://localhost:8000/a2a/capabilities
+
+# Execute a skill
+curl -X POST \
+     -H "X-N8N-API-KEY: your_api_key" \
+     -H "Content-Type: application/json" \
+     -d '{"skill_id": "list_workflows", "parameters": {"active": true}}' \
+     http://localhost:8000/a2a/execute
+
+# Batch execution
+curl -X POST \
+     -H "X-N8N-API-KEY: your_api_key" \
+     -H "Content-Type: application/json" \
+     -d '{"requests": [{"skill_id": "list_workflows", "parameters": {}}]}' \
+     http://localhost:8000/a2a/batch
+```
+
+#### Agent-to-Agent Workflow
+```python
+# Agent A discovers Agent B's capabilities
+agent_card = await get_agent_card("http://n8n-agent:8000")
+
+# Agent A checks if Agent B has workflow management skills
+if "list_workflows" in agent_card["skills"]:
+    # Agent A requests Agent B to list workflows
+    result = await execute_skill(
+        "http://n8n-agent:8000",
+        "list_workflows",
+        {"active": True}
+    )
+```
+
+### A2A Authentication
+
+A2A endpoints use the same n8n API key authentication:
+- Pass the API key via `X-N8N-API-KEY` header
+- Same security considerations as MCP mode
+- All requests are authenticated
+
 ## Security Notes
 
 - **Never commit your API key** to version control
@@ -269,6 +450,8 @@ This project uses [uv](https://github.com/astral-sh/uv) because it's:
 - Your API key has full access to n8n - treat it like a password
 - Regenerate keys regularly as a security best practice
 - Use `.gitignore` to exclude `.env` files
+- **A2A HTTP Mode**: Consider using HTTPS in production for encrypted communication
+- **A2A HTTP Mode**: Implement rate limiting for public-facing deployments
 
 ## Contributing
 

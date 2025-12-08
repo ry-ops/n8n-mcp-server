@@ -1,0 +1,468 @@
+{
+  "name": "n8n-mcp-server",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server for n8n API integration with Agent-to-Agent (A2A) protocol support",
+  "author": "ry-ops",
+  "license": "MIT",
+  "homepage": "https://github.com/ry-ops/n8n-mcp-server",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ry-ops/n8n-mcp-server"
+  },
+  "protocols": {
+    "mcp": {
+      "version": "1.0",
+      "transport": "stdio",
+      "supported": true
+    },
+    "a2a": {
+      "version": "1.0",
+      "supported": true,
+      "endpoints": {
+        "discovery": "/.well-known/agent-card.json",
+        "capabilities": "/a2a/capabilities",
+        "execute": "/a2a/execute"
+      }
+    }
+  },
+  "capabilities": {
+    "streaming": false,
+    "async_execution": true,
+    "batch_operations": true,
+    "event_notifications": false,
+    "state_management": false
+  },
+  "authentication": {
+    "required": true,
+    "methods": ["api_key"],
+    "api_key": {
+      "type": "header",
+      "name": "X-N8N-API-KEY",
+      "description": "n8n API key required for authentication"
+    }
+  },
+  "skills": [
+    {
+      "id": "list_workflows",
+      "name": "List Workflows",
+      "description": "List all workflows in n8n with optional filtering by active status",
+      "category": "workflow_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Filter by active status (optional)"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Array of workflow objects with names, IDs, active status, and tags"
+      }
+    },
+    {
+      "id": "get_workflow",
+      "name": "Get Workflow",
+      "description": "Get detailed information about a specific workflow including its nodes and connections",
+      "category": "workflow_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "The workflow ID",
+            "required": true
+          }
+        },
+        "required": ["workflow_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Detailed workflow information including nodes and connections"
+      }
+    },
+    {
+      "id": "create_workflow",
+      "name": "Create Workflow",
+      "description": "Create a new workflow in n8n",
+      "category": "workflow_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the workflow",
+            "required": true
+          },
+          "nodes": {
+            "type": "array",
+            "description": "Array of workflow nodes"
+          },
+          "connections": {
+            "type": "object",
+            "description": "Connections between nodes"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the workflow should be active",
+            "default": false
+          },
+          "settings": {
+            "type": "object",
+            "description": "Workflow settings"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Workflow tags"
+          }
+        },
+        "required": ["name"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Created workflow information"
+      }
+    },
+    {
+      "id": "update_workflow",
+      "name": "Update Workflow",
+      "description": "Update an existing workflow",
+      "category": "workflow_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "The workflow ID to update",
+            "required": true
+          },
+          "name": {
+            "type": "string",
+            "description": "New name for the workflow"
+          },
+          "nodes": {
+            "type": "array",
+            "description": "Updated workflow nodes"
+          },
+          "connections": {
+            "type": "object",
+            "description": "Updated connections between nodes"
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether the workflow should be active"
+          },
+          "settings": {
+            "type": "object",
+            "description": "Updated workflow settings"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Updated workflow tags"
+          }
+        },
+        "required": ["workflow_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Updated workflow information"
+      }
+    },
+    {
+      "id": "delete_workflow",
+      "name": "Delete Workflow",
+      "description": "Delete a workflow from n8n",
+      "category": "workflow_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "The workflow ID to delete",
+            "required": true
+          }
+        },
+        "required": ["workflow_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Deletion confirmation"
+      }
+    },
+    {
+      "id": "activate_workflow",
+      "name": "Activate Workflow",
+      "description": "Activate a workflow to start it running",
+      "category": "workflow_control",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "The workflow ID to activate",
+            "required": true
+          }
+        },
+        "required": ["workflow_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Activation confirmation"
+      }
+    },
+    {
+      "id": "deactivate_workflow",
+      "name": "Deactivate Workflow",
+      "description": "Deactivate a workflow to stop it from running",
+      "category": "workflow_control",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "The workflow ID to deactivate",
+            "required": true
+          }
+        },
+        "required": ["workflow_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Deactivation confirmation"
+      }
+    },
+    {
+      "id": "execute_workflow",
+      "name": "Execute Workflow",
+      "description": "Execute a workflow manually with optional input data",
+      "category": "workflow_execution",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "The workflow ID to execute",
+            "required": true
+          },
+          "data": {
+            "type": "object",
+            "description": "Input data for the workflow execution"
+          }
+        },
+        "required": ["workflow_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Execution result and status"
+      }
+    },
+    {
+      "id": "list_executions",
+      "name": "List Executions",
+      "description": "List workflow executions with optional filtering by workflow ID, status, and limit",
+      "category": "execution_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "workflow_id": {
+            "type": "string",
+            "description": "Filter by workflow ID (optional)"
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status: success, error, waiting, running (optional)",
+            "enum": ["success", "error", "waiting", "running"]
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of executions to return (default: 20)",
+            "default": 20
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Array of execution objects with status and details"
+      }
+    },
+    {
+      "id": "get_execution",
+      "name": "Get Execution",
+      "description": "Get detailed information about a specific execution",
+      "category": "execution_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "description": "The execution ID",
+            "required": true
+          }
+        },
+        "required": ["execution_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Detailed execution information including results"
+      }
+    },
+    {
+      "id": "delete_execution",
+      "name": "Delete Execution",
+      "description": "Delete an execution from n8n",
+      "category": "execution_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "description": "The execution ID to delete",
+            "required": true
+          }
+        },
+        "required": ["execution_id"]
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Deletion confirmation"
+      }
+    },
+    {
+      "id": "list_credentials",
+      "name": "List Credentials",
+      "description": "List all credentials in n8n with optional filtering by type",
+      "category": "credentials_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Filter by credential type (optional)"
+          }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Array of credential objects"
+      }
+    },
+    {
+      "id": "list_tags",
+      "name": "List Tags",
+      "description": "List all tags used in workflows",
+      "category": "tag_management",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      },
+      "output_schema": {
+        "type": "object",
+        "description": "Array of tag objects"
+      }
+    }
+  ],
+  "categories": {
+    "workflow_management": {
+      "name": "Workflow Management",
+      "description": "Create, read, update, and delete n8n workflows"
+    },
+    "workflow_control": {
+      "name": "Workflow Control",
+      "description": "Activate and deactivate n8n workflows"
+    },
+    "workflow_execution": {
+      "name": "Workflow Execution",
+      "description": "Execute workflows manually with custom data"
+    },
+    "execution_management": {
+      "name": "Execution Management",
+      "description": "View and manage workflow execution history"
+    },
+    "credentials_management": {
+      "name": "Credentials Management",
+      "description": "List and manage n8n credentials"
+    },
+    "tag_management": {
+      "name": "Tag Management",
+      "description": "List and manage workflow tags"
+    }
+  },
+  "configuration": {
+    "required_env_vars": {
+      "N8N_URL": {
+        "description": "URL of your n8n instance",
+        "example": "http://localhost:5678",
+        "required": true
+      },
+      "N8N_API_KEY": {
+        "description": "API key for n8n authentication",
+        "required": true,
+        "sensitive": true
+      }
+    },
+    "optional_env_vars": {
+      "N8N_TIMEOUT": {
+        "description": "HTTP request timeout in seconds",
+        "default": "30",
+        "type": "number"
+      },
+      "N8N_VERIFY_SSL": {
+        "description": "Enable SSL certificate verification",
+        "default": "true",
+        "type": "boolean"
+      },
+      "LOG_LEVEL": {
+        "description": "Logging level",
+        "default": "INFO",
+        "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+      }
+    }
+  },
+  "requirements": {
+    "python": ">=3.10",
+    "dependencies": [
+      "mcp>=1.9.4",
+      "httpx>=0.27.0"
+    ]
+  },
+  "installation": {
+    "methods": {
+      "uv": {
+        "command": "uv pip install n8n-mcp-server",
+        "recommended": true
+      },
+      "pip": {
+        "command": "pip install n8n-mcp-server"
+      }
+    }
+  },
+  "usage": {
+    "mcp_server": {
+      "command": "n8n-mcp-server",
+      "transport": "stdio",
+      "description": "Run as MCP server via stdio transport"
+    },
+    "a2a_agent": {
+      "description": "Agent-to-agent communication via HTTP endpoints",
+      "note": "Requires HTTP server wrapper (see documentation)"
+    }
+  },
+  "tags": [
+    "n8n",
+    "mcp",
+    "model-context-protocol",
+    "a2a",
+    "agent-to-agent",
+    "workflow-automation",
+    "api-integration",
+    "claude",
+    "ai-tools"
+  ]
+}

@@ -58,6 +58,10 @@ dev = [
     "safety>=3.0.0",
     "packaging>=23.0",
 ]
+a2a = [
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+]
 
 [build-system]
 requires = ["hatchling"]
