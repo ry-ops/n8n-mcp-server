@@ -1,5 +1,7 @@
 <img src="https://github.com/ry-ops/n8n-mcp-server/blob/main/n8n-mcp-server.png" width="100%">
 
+> **Part of the [Cortex Ecosystem](https://github.com/ry-ops/cortex)** - Multi-agent AI system for autonomous infrastructure management
+
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/badge/uv-latest-green.svg)](https://github.com/astral-sh/uv)
 [![MCP](https://img.shields.io/badge/MCP-1.0-purple.svg)](https://modelcontextprotocol.io/)
