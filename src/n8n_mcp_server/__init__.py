@@ -7,7 +7,10 @@ import os
 import re
 import signal
 import sys
-from typing import Any, Optional
+import time
+from datetime import datetime
+from typing import Any, Optional, Callable
+from functools import wraps
 
 import httpx
 from mcp.server import Server
@@ -20,6 +23,145 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# Retry configuration
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404}
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_BASE = 1.0  # 1 second
+MAX_BACKOFF = 8.0  # 8 seconds max
+
+
+def async_retry_with_backoff(
+    max_retries: Optional[int] = None,
+    base_delay: float = DEFAULT_BACKOFF_BASE,
+    max_delay: float = MAX_BACKOFF,
+):
+    """
+    Decorator for async functions to retry with exponential backoff.
+
+    Retries on:
+    - Connection errors (ConnectError, TimeoutException, etc.)
+    - HTTP 429 (rate limit), 500, 502, 503, 504
+
+    Does NOT retry on:
+    - HTTP 400, 401, 403, 404 (client errors)
+
+    Args:
+        max_retries: Maximum number of retries (defaults to env N8N_MAX_RETRIES or 3)
+        base_delay: Base delay for exponential backoff (default: 1 second)
+        max_delay: Maximum delay between retries (default: 8 seconds)
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Get max_retries from env or use default
+            retries = max_retries
+            if retries is None:
+                retries = int(os.getenv("N8N_MAX_RETRIES", str(DEFAULT_MAX_RETRIES)))
+
+            last_exception = None
+
+            for attempt in range(retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+
+                except httpx.HTTPStatusError as e:
+                    last_exception = e
+                    status_code = e.response.status_code
+
+                    # Don't retry on client errors (400, 401, 403, 404)
+                    if status_code in NON_RETRYABLE_STATUS_CODES:
+                        logger.debug(f"Non-retryable status {status_code}, not retrying")
+                        raise
+
+                    # Retry on specific server errors and rate limits
+                    if status_code in RETRYABLE_STATUS_CODES:
+                        if attempt < retries:
+                            # Check for Retry-After header (rate limiting)
+                            retry_after = e.response.headers.get("Retry-After")
+                            if retry_after:
+                                try:
+                                    delay = float(retry_after)
+                                    # Cap the delay at max_delay
+                                    delay = min(delay, max_delay)
+                                    logger.info(
+                                        f"Rate limited (429), respecting Retry-After: {delay}s "
+                                        f"(attempt {attempt + 1}/{retries + 1})"
+                                    )
+                                except ValueError:
+                                    # If Retry-After is not a number, use exponential backoff
+                                    delay = min(base_delay * (2 ** attempt), max_delay)
+                                    logger.info(
+                                        f"Rate limited (429), using backoff: {delay}s "
+                                        f"(attempt {attempt + 1}/{retries + 1})"
+                                    )
+                            else:
+                                # Exponential backoff: 1s, 2s, 4s, 8s
+                                delay = min(base_delay * (2 ** attempt), max_delay)
+                                logger.info(
+                                    f"Retrying after HTTP {status_code}, "
+                                    f"waiting {delay}s (attempt {attempt + 1}/{retries + 1})"
+                                )
+
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            # Max retries exceeded for retryable status - convert to user-friendly message
+                            error_messages = {
+                                429: "Rate limit exceeded. Please try again later.",
+                                500: "n8n server error. Please check your n8n instance.",
+                                502: "n8n bad gateway error.",
+                                503: "n8n service unavailable.",
+                                504: "n8n gateway timeout.",
+                            }
+                            user_message = error_messages.get(
+                                status_code,
+                                "An error occurred while communicating with n8n."
+                            )
+                            raise Exception(user_message)
+
+                    # For other HTTP errors, don't retry
+                    raise
+
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as e:
+                    last_exception = e
+
+                    # Retry on connection/network errors
+                    if attempt < retries:
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        logger.info(
+                            f"Connection error ({type(e).__name__}), "
+                            f"retrying in {delay}s (attempt {attempt + 1}/{retries + 1})"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    # Max retries exceeded - convert to user-friendly message
+                    raise Exception("Unable to connect to n8n. Please check your N8N_URL.")
+
+            # Should not reach here, but handle it just in case
+            if last_exception:
+                # Convert final HTTPStatusError to user-friendly message
+                if isinstance(last_exception, httpx.HTTPStatusError):
+                    status_code = last_exception.response.status_code
+                    error_messages = {
+                        429: "Rate limit exceeded. Please try again later.",
+                        500: "n8n server error. Please check your n8n instance.",
+                        502: "n8n bad gateway error.",
+                        503: "n8n service unavailable.",
+                        504: "n8n gateway timeout.",
+                    }
+                    user_message = error_messages.get(
+                        status_code,
+                        "An error occurred while communicating with n8n."
+                    )
+                    raise Exception(user_message)
+                raise last_exception
+
+        return wrapper
+    return decorator
 
 
 class N8nMCPServer:
@@ -127,6 +269,7 @@ class N8nMCPServer:
 
         return id_str
 
+    @async_retry_with_backoff()
     async def _make_request(
         self,
         endpoint: str,
@@ -134,7 +277,7 @@ class N8nMCPServer:
         data: Optional[dict] = None,
         params: Optional[dict] = None,
     ) -> Any:
-        """Make a request to the n8n API."""
+        """Make a request to the n8n API with automatic retry logic."""
         url = f"{self.n8n_url}/api/v1{endpoint}"
 
         try:
@@ -156,15 +299,18 @@ class N8nMCPServer:
             # Log full error internally for debugging
             logger.error(f"n8n API error: {method} {endpoint} - {e.response.status_code} - {str(e)}")
 
-            # Return user-friendly sanitized message
             status_code = e.response.status_code
+
+            # For retryable errors, re-raise the original HTTPStatusError
+            # so the decorator can handle retries
+            if status_code in RETRYABLE_STATUS_CODES:
+                raise
+
+            # For non-retryable errors, convert to user-friendly message
             error_messages = {
                 401: "Authentication failed. Please check your API key.",
                 403: "Access denied. Insufficient permissions.",
                 404: "Resource not found.",
-                429: "Rate limit exceeded. Please try again later.",
-                500: "n8n server error. Please check your n8n instance.",
-                503: "n8n service unavailable.",
             }
             user_message = error_messages.get(
                 status_code,
@@ -175,8 +321,9 @@ class N8nMCPServer:
         except httpx.RequestError as e:
             # Log full error internally
             logger.error(f"Request error: {method} {endpoint} - {str(e)}")
-            # Return sanitized message
-            raise Exception("Unable to connect to n8n. Please check your N8N_URL.")
+            # For connection/network errors, re-raise so decorator can retry
+            # The decorator will convert to a user-friendly message after retries are exhausted
+            raise
 
     def _setup_handlers(self):
         """Set up MCP request handlers."""
@@ -188,7 +335,8 @@ class N8nMCPServer:
                 Tool(
                     name="list_workflows",
                     description=(
-                        "List all workflows in n8n. Returns workflow names, IDs, active status, and tags."
+                        "List all workflows in n8n with enhanced filtering options. "
+                        "Returns workflow names, IDs, active status, tags, and timestamps."
                     ),
                     inputSchema={
                         "type": "object",
@@ -196,6 +344,22 @@ class N8nMCPServer:
                             "active": {
                                 "type": "boolean",
                                 "description": "Filter by active status (optional)",
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Filter by workflow name (case-insensitive substring match, optional)",
+                            },
+                            "tags": {
+                                "type": "string",
+                                "description": "Filter by tag names (comma-separated, workflow must have all specified tags, optional)",
+                            },
+                            "created_after": {
+                                "type": "string",
+                                "description": "Filter workflows created after this date (ISO 8601 format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, optional)",
+                            },
+                            "updated_after": {
+                                "type": "string",
+                                "description": "Filter workflows updated after this date (ISO 8601 format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ, optional)",
                             },
                         },
                     },
@@ -418,6 +582,60 @@ class N8nMCPServer:
                     description="List all tags used in workflows.",
                     inputSchema={"type": "object", "properties": {}},
                 ),
+                Tool(
+                    name="list_webhooks",
+                    description=(
+                        "List all webhook endpoints across workflows. Returns workflows containing webhook nodes "
+                        "with their URLs, HTTP methods, and active status."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "active": {
+                                "type": "boolean",
+                                "description": "Filter by active workflow status (optional)",
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="get_webhook",
+                    description=(
+                        "Get detailed information about a webhook by workflow ID. "
+                        "Returns webhook configuration including URL paths, HTTP methods, authentication, and response settings."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "workflow_id": {
+                                "type": "string",
+                                "description": "The workflow ID containing the webhook",
+                            }
+                        },
+                        "required": ["workflow_id"],
+                    },
+                ),
+                Tool(
+                    name="test_webhook",
+                    description=(
+                        "Test a webhook endpoint by executing its workflow with test data. "
+                        "Returns the execution result to verify webhook functionality."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "workflow_id": {
+                                "type": "string",
+                                "description": "The workflow ID containing the webhook to test",
+                            },
+                            "data": {
+                                "type": "object",
+                                "description": "Test data to send to the webhook (optional)",
+                            },
+                        },
+                        "required": ["workflow_id"],
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -450,6 +668,12 @@ class N8nMCPServer:
                     result = await self._list_credentials(arguments)
                 elif name == "list_tags":
                     result = await self._list_tags(arguments)
+                elif name == "list_webhooks":
+                    result = await self._list_webhooks(arguments)
+                elif name == "get_webhook":
+                    result = await self._get_webhook(arguments)
+                elif name == "test_webhook":
+                    result = await self._test_webhook(arguments)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
 
@@ -460,12 +684,93 @@ class N8nMCPServer:
 
     # Tool implementations
     async def _list_workflows(self, args: dict) -> Any:
-        """List workflows."""
+        """List workflows with enhanced filtering.
+
+        Supports filtering by:
+        - active: boolean (API-level filter)
+        - name: substring match (client-side filter)
+        - tags: comma-separated tag names (client-side filter)
+        - created_after: ISO 8601 date (client-side filter)
+        - updated_after: ISO 8601 date (client-side filter)
+        """
+        # API-level filtering (supported by n8n API)
         params = {}
         if args.get("active") is not None:
             params["active"] = str(args["active"]).lower()
 
-        return await self._make_request("/workflows", params=params)
+        # Get workflows from API
+        response = await self._make_request("/workflows", params=params)
+
+        # Client-side filtering for enhanced options
+        workflows = response.get("data", [])
+
+        # Filter by name (case-insensitive substring match)
+        if args.get("name"):
+            name_filter = args["name"].lower()
+            workflows = [
+                w for w in workflows
+                if name_filter in w.get("name", "").lower()
+            ]
+
+        # Filter by tags (comma-separated, must have all specified tags)
+        if args.get("tags"):
+            required_tags = [tag.strip().lower() for tag in args["tags"].split(",")]
+            workflows = [
+                w for w in workflows
+                if all(
+                    any(tag.lower() == req_tag for tag in w.get("tags", []))
+                    for req_tag in required_tags
+                )
+            ]
+
+        # Filter by created_after date
+        if args.get("created_after"):
+            try:
+                created_after = self._parse_date(args["created_after"])
+                workflows = [
+                    w for w in workflows
+                    if w.get("createdAt") and self._parse_date(w["createdAt"]) >= created_after
+                ]
+            except ValueError as e:
+                raise ValueError(f"Invalid created_after date format: {str(e)}")
+
+        # Filter by updated_after date
+        if args.get("updated_after"):
+            try:
+                updated_after = self._parse_date(args["updated_after"])
+                workflows = [
+                    w for w in workflows
+                    if w.get("updatedAt") and self._parse_date(w["updatedAt"]) >= updated_after
+                ]
+            except ValueError as e:
+                raise ValueError(f"Invalid updated_after date format: {str(e)}")
+
+        # Return filtered results in the same format as the API
+        return {"data": workflows}
+
+    def _parse_date(self, date_str: str) -> datetime:
+        """Parse ISO 8601 date string to datetime object.
+
+        Supports formats:
+        - YYYY-MM-DD
+        - YYYY-MM-DDTHH:MM:SSZ
+        - YYYY-MM-DDTHH:MM:SS.fffZ
+        """
+        # Try full ISO 8601 format with timezone
+        for fmt in [
+            "%Y-%m-%dT%H:%M:%S.%fZ",
+            "%Y-%m-%dT%H:%M:%SZ",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d"
+        ]:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+
+        raise ValueError(
+            f"Date must be in ISO 8601 format (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ): {date_str}"
+        )
 
     async def _get_workflow(self, args: dict) -> Any:
         """Get workflow details."""
@@ -568,6 +873,151 @@ class N8nMCPServer:
     async def _list_tags(self, args: dict) -> Any:
         """List tags."""
         return await self._make_request("/tags")
+
+    async def _list_webhooks(self, args: dict) -> Any:
+        """
+        List all webhook endpoints across workflows.
+
+        This scans all workflows and extracts webhook node information.
+        """
+        # Get all workflows with optional active filter
+        params = {}
+        if args.get("active") is not None:
+            params["active"] = str(args["active"]).lower()
+
+        workflows_response = await self._make_request("/workflows", params=params)
+
+        # Extract workflows data (handle both direct array and {data: array} formats)
+        workflows = workflows_response
+        if isinstance(workflows_response, dict) and "data" in workflows_response:
+            workflows = workflows_response["data"]
+
+        # Extract webhook information from each workflow
+        webhook_list = []
+        for workflow in workflows:
+            workflow_id = workflow.get("id")
+            workflow_name = workflow.get("name")
+            is_active = workflow.get("active", False)
+
+            # Get full workflow details to access nodes
+            try:
+                workflow_details = await self._make_request(f"/workflows/{workflow_id}")
+                nodes = workflow_details.get("nodes", [])
+
+                # Find webhook nodes
+                for node in nodes:
+                    node_type = node.get("type", "")
+                    if node_type == "n8n-nodes-base.webhook":
+                        webhook_info = {
+                            "workflow_id": workflow_id,
+                            "workflow_name": workflow_name,
+                            "workflow_active": is_active,
+                            "node_name": node.get("name"),
+                            "node_id": node.get("id"),
+                            "webhook_path": node.get("parameters", {}).get("path", ""),
+                            "http_method": node.get("parameters", {}).get("httpMethod", "GET"),
+                            "response_mode": node.get("parameters", {}).get("responseMode", "onReceived"),
+                            "authentication": node.get("parameters", {}).get("authentication", "none"),
+                        }
+                        webhook_list.append(webhook_info)
+            except Exception as e:
+                # Log error but continue processing other workflows
+                logger.warning(f"Error processing workflow {workflow_id}: {str(e)}")
+                continue
+
+        return {
+            "webhooks": webhook_list,
+            "total_count": len(webhook_list)
+        }
+
+    async def _get_webhook(self, args: dict) -> Any:
+        """
+        Get detailed webhook information for a specific workflow.
+
+        Returns webhook nodes and their configuration.
+        """
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
+
+        # Get workflow details
+        workflow = await self._make_request(f"/workflows/{workflow_id}")
+
+        nodes = workflow.get("nodes", [])
+        webhook_nodes = []
+
+        # Find all webhook nodes in the workflow
+        for node in nodes:
+            node_type = node.get("type", "")
+            if node_type == "n8n-nodes-base.webhook":
+                parameters = node.get("parameters", {})
+                webhook_config = {
+                    "node_name": node.get("name"),
+                    "node_id": node.get("id"),
+                    "webhook_path": parameters.get("path", ""),
+                    "http_method": parameters.get("httpMethod", "GET"),
+                    "response_mode": parameters.get("responseMode", "onReceived"),
+                    "response_data": parameters.get("responseData", "firstEntryJson"),
+                    "authentication": parameters.get("authentication", "none"),
+                    "allowed_origins": parameters.get("allowedOrigins", "*"),
+                    "response_code": parameters.get("responseCode", 200),
+                    "response_headers": parameters.get("responseHeaders", {}),
+                }
+
+                # Add IP whitelist if configured
+                if parameters.get("ipWhitelist"):
+                    webhook_config["ip_whitelist"] = parameters.get("ipWhitelist")
+
+                webhook_nodes.append(webhook_config)
+
+        if not webhook_nodes:
+            raise ValueError(f"No webhook nodes found in workflow {workflow_id}")
+
+        return {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow.get("name"),
+            "workflow_active": workflow.get("active", False),
+            "webhook_nodes": webhook_nodes,
+            "total_webhook_nodes": len(webhook_nodes)
+        }
+
+    async def _test_webhook(self, args: dict) -> Any:
+        """
+        Test a webhook by executing its workflow.
+
+        This validates that the webhook workflow can execute successfully.
+        """
+        workflow_id = self._validate_id(args.get('workflow_id'), "Workflow ID")
+
+        # First verify the workflow contains webhook nodes
+        workflow = await self._make_request(f"/workflows/{workflow_id}")
+        nodes = workflow.get("nodes", [])
+
+        has_webhook = any(
+            node.get("type") == "n8n-nodes-base.webhook"
+            for node in nodes
+        )
+
+        if not has_webhook:
+            raise ValueError(
+                f"Workflow {workflow_id} does not contain any webhook nodes. "
+                "Cannot test a non-webhook workflow."
+            )
+
+        # Execute the workflow with test data
+        data = args.get("data", {})
+
+        execution_result = await self._make_request(
+            f"/workflows/{workflow_id}/execute",
+            method="POST",
+            data=data
+        )
+
+        return {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow.get("name"),
+            "test_result": "success",
+            "execution": execution_result,
+            "message": "Webhook workflow executed successfully"
+        }
 
     async def run(self):
         """Run the MCP server."""
