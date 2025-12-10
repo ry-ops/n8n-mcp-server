@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  n8n-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/ry-ops/n8n-mcp-server:latest
+    container_name: n8n-mcp-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - N8N_HOST=${N8N_HOST:-http://10.88.140.149:5678}
+      - N8N_API_KEY=${N8N_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # MCP servers communicate via stdio, not network ports
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.cortex.mcp-server=n8n"
+      - "com.cortex.version=1.0.0"
